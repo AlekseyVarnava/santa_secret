@@ -4,4 +4,4 @@
 *.iws
 out/
 
-.env
+cmd/bot/.env

@@ -9,12 +9,13 @@ const (
 	StateAskRole State = "ask_role"
 
 	// Organizer
-	StateOrgMenu       State = "org_menu"
-	StateNewSanta      State = "org_new_santa"
-	StateOrgEnterDes   State = "org_enter_desires"
-	StateOrgGroupID    State = "org_group_id"
-	StateOrgSendDes    State = "org_send_desires"
-	StateOrgStartSanta State = "org_start_santa"
+	StateOrgMenu        State = "org_menu"
+	StateNewSanta       State = "org_new_santa"
+	StateOrgEnterDes    State = "org_enter_desires"
+	StateOrgGroupID     State = "org_group_id"
+	StateOrgSendDes     State = "org_send_desires"
+	StateOrgStartSanta  State = "org_start_santa"
+	StateOrgSelectGroup State = "org_select_group"
 
 	// Participant
 	StateEnterGroupID State = "user_group_id"

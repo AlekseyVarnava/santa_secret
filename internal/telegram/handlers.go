@@ -17,13 +17,7 @@ import (
 	"santa/internal/fsm"
 )
 
-// handlers.go — основной файл с логикой бота (вариант B — умеренный продовый).
-// Этот файл реализует Bot, маршрутизацию обновлений, FSM-логику, работу с БД
-// (создание групп, участников, пожеланий), запуск розыгрыша и рассылку.
-
-// Предположение: в проекте присутствуют другие модули, перечисленные в архитектуре.
-// Этот файл — автономная реализация логики Telegram-а, использующая прямые SQL-запросы
-// к Postgres через переданное *sql.DB.
+// handlers.go — основной файл с логикой бота.
 
 // Bot хранит основное состояние и зависимости.
 type Bot struct {
@@ -35,6 +29,10 @@ type Bot struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// pendingGroup хранит временную привязку пользователя -> group_id
+	pendingGroupMu sync.Mutex
+	pendingGroup   map[int64]int64
 }
 
 // NewBot создаёт новый экземпляр бота. Принимает существующее подключение к БД, токен и логгер.
@@ -60,13 +58,14 @@ func NewBot(db *sql.DB, token string, logger *zap.Logger) (*Bot, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	b := &Bot{
-		api:    api,
-		db:     db,
-		log:    logger,
-		fsm:    fsm.NewFSM(),
-		rnd:    rand.New(rand.NewSource(time.Now().UnixNano())),
-		ctx:    ctx,
-		cancel: cancel,
+		api:          api,
+		db:           db,
+		log:          logger,
+		fsm:          fsm.NewFSM(),
+		rnd:          rand.New(rand.NewSource(time.Now().UnixNano())),
+		ctx:          ctx,
+		cancel:       cancel,
+		pendingGroup: make(map[int64]int64),
 	}
 
 	return b, nil
@@ -141,6 +140,9 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) error {
 	// FSM-based routing: если у пользователя установлен ожидающий state, меняем поведение
 	st := b.fsm.Get(userID)
 	switch st {
+	case fsm.StateOrgGroupID:
+		// Организатор ввёл код группы, показать меню для этой группы
+		return b.handleOrganizerGroupCode(chatID, userID, text)
 	case fsm.StateEnterGroupID:
 		// Ожидали код группы для присоединения
 		code := text
@@ -162,7 +164,8 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) error {
 	case "Новый Тайный Санта":
 		return b.createGroupFlow(chatID, userID)
 	case "Я уже Тайный Санта":
-		return b.sendText(chatID, "Введите код группы, с которой вы работаете (или используйте кнопку):")
+		b.fsm.Set(userID, fsm.StateOrgGroupID)
+		return b.sendText(chatID, "Введите код группы:")
 	case "Показать участников":
 		return b.handleShowParticipants(chatID, userID)
 	case "Отправить пожелания":
@@ -191,16 +194,47 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) error {
 
 	b.log.Debug("callback", zap.String("data", data), zap.Int64("chat_id", chatID))
 
-	if strings.HasPrefix(data, "JOIN:") {
+	switch {
+	case data == "MAIN_MENU":
+		return b.sendStartMenu(chatID)
+
+	case strings.HasPrefix(data, "JOIN:"):
 		code := strings.TrimPrefix(data, "JOIN:")
 		return b.handleJoinByCode(chatID, uid, code)
-	}
-	if strings.HasPrefix(data, "SENDMSG:") {
+
+	case strings.HasPrefix(data, "SENDMSG:"):
 		code := strings.TrimPrefix(data, "SENDMSG:")
 		return b.sendAssignmentsToParticipants(code)
+
+	case strings.HasPrefix(data, "ORG_WILL_PARTICIPATE:"):
+		code := strings.TrimPrefix(data, "ORG_WILL_PARTICIPATE:")
+		return b.handleOrgWillParticipateCallback(chatID, uid, code)
+
+	case strings.HasPrefix(data, "ORG_WONT_PARTICIPATE:"):
+		// просто показать меню организатора
+		return b.showOrganizerMenu(chatID)
+
+	case strings.HasPrefix(data, "SHOW_PARTICIPANTS:"):
+		code := strings.TrimPrefix(data, "SHOW_PARTICIPANTS:")
+		return b.handleShowParticipantsForGroup(chatID, uid, code)
+
+	case strings.HasPrefix(data, "ORG_SEND_DESIRES:"):
+		code := strings.TrimPrefix(data, "ORG_SEND_DESIRES:")
+		return b.handleOrgSendDesiresCallback(chatID, uid, code)
+
+	case strings.HasPrefix(data, "DECLINE_FOR_GROUP:"):
+		code := strings.TrimPrefix(data, "DECLINE_FOR_GROUP:")
+		return b.handleDeclineForGroup(chatID, uid, code)
+
+	case strings.HasPrefix(data, "START_FOR_GROUP:"):
+		code := strings.TrimPrefix(data, "START_FOR_GROUP:")
+		return b.cmdRunGroup(chatID, uid, code)
+
+	default:
+		// нераспознанный callback
+		b.log.Debug("unknown callback", zap.String("data", data))
+		return nil
 	}
-	// другие callback-ы можно обработать здесь
-	return nil
 }
 
 // -------------------- Команды и потоки --------------------
@@ -299,35 +333,95 @@ func (b *Bot) handleJoinByCode(chatID int64, userID int64, code string) error {
 	}
 
 	// Просим отправить пожелания
+	// Просим отправить пожелания
+	b.pendingGroupMu.Lock()
+	b.pendingGroup[userID] = groupID
+	b.pendingGroupMu.Unlock()
+
 	b.fsm.Set(userID, fsm.StateEnterDesires)
+
 	m := tgbotapi.NewMessage(chatID, "Вы присоединились. Отправьте, пожалуйста, ваши пожелания для подарка одним сообщением.")
 	m.ReplyMarkup = tgbotapi.NewRemoveKeyboard(true)
 	_, err = b.api.Send(m)
 	return err
 }
 
+func (b *Bot) handleOrganizerGroupCode(chatID int64, userID int64, code string) error {
+	code = strings.TrimSpace(code)
+	var groupID int64
+	var leaderID int64
+	if err := b.db.QueryRow(`SELECT id, leader_tg_id FROM santa_groups WHERE group_code=$1`, code).Scan(&groupID, &leaderID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return b.sendText(chatID, "Группа не найдена")
+		}
+		b.log.Error("handleOrganizerGroupCode: select", zap.Error(err))
+		return b.sendText(chatID, "Ошибка при поиске группы")
+	}
+	if leaderID != userID {
+		return b.sendText(chatID, "Вы не являетесь организатором этой группы")
+	}
+
+	// показываем меню для конкретной группы (используем inline кнопки с кодом)
+	m := tgbotapi.NewMessage(chatID, fmt.Sprintf("Меню для группы %s", code))
+	m.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Показать участников", "SHOW_PARTICIPANTS:"+code),
+			tgbotapi.NewInlineKeyboardButtonData("Отправить пожелания", "ORG_SEND_DESIRES:"+code),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Отказаться от участника (по коду)", "DECLINE_FOR_GROUP:"+code),
+			tgbotapi.NewInlineKeyboardButtonData("Запустить Тайного Санту!", "START_FOR_GROUP:"+code),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Главное меню", "MAIN_MENU"),
+		),
+	)
+	_, err := b.api.Send(m)
+	// Сбрасываем FSM — остаёмся в роли организатора
+	b.fsm.Set(userID, fsm.StateOrgMenu)
+	return err
+}
+
 // handleReceiveDesires — сохранение пожеланий для participant'а; работает и для организатора
 func (b *Bot) handleReceiveDesires(chatID int64, userID int64, text string) error {
-	// Найдём все участия пользователя (возможен многократный участник в разных группах)
-	rows, err := b.db.Query(`SELECT group_id FROM participants WHERE tg_id=$1`, userID)
-	if err != nil {
-		b.log.Error("handleReceiveDesires: select group ids", zap.Error(err))
-		return b.sendText(chatID, "Ошибка при сохранении пожеланий")
+	// Проверяем, есть ли pendingGroup для данного пользователя
+	b.pendingGroupMu.Lock()
+	gid, has := b.pendingGroup[userID]
+	if has {
+		delete(b.pendingGroup, userID)
 	}
-	defer rows.Close()
+	b.pendingGroupMu.Unlock()
 
 	var affected int64
-	for rows.Next() {
-		var gid int64
-		if err := rows.Scan(&gid); err != nil {
-			continue
+
+	if has {
+		// Сохраняем только для указанной группы
+		if _, err := b.db.Exec(`UPDATE participants SET desires=$1 WHERE tg_id=$2 AND group_id=$3`, text, userID, gid); err != nil {
+			b.log.Error("handleReceiveDesires: update single group", zap.Error(err))
+			return b.sendText(chatID, "Ошибка при сохранении пожеланий")
 		}
-		_, err := b.db.Exec(`UPDATE participants SET desires=$1 WHERE tg_id=$2 AND group_id=$3`, text, userID, gid)
-		if err == nil {
-			affected++
+		affected = 1
+	} else {
+		// Старое поведение: обновить для всех групп пользователя
+		rows, err := b.db.Query(`SELECT group_id FROM participants WHERE tg_id=$1`, userID)
+		if err != nil {
+			b.log.Error("handleReceiveDesires: select group ids", zap.Error(err))
+			return b.sendText(chatID, "Ошибка при сохранении пожеланий")
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var gid2 int64
+			if err := rows.Scan(&gid2); err != nil {
+				continue
+			}
+			if _, err := b.db.Exec(`UPDATE participants SET desires=$1 WHERE tg_id=$2 AND group_id=$3`, text, userID, gid2); err == nil {
+				affected++
+			}
 		}
 	}
 
+	// Возвращаем пользователя в главное меню/ролевое состояние
 	b.fsm.Set(userID, fsm.StateAskRole)
 	return b.sendText(chatID, fmt.Sprintf("Пожелания сохранены для %d группы(ы)", affected))
 }
@@ -374,6 +468,118 @@ func (b *Bot) handleDecline(chatID int64, userID int64) error {
 	}
 	n, _ := res.RowsAffected()
 	return b.sendText(chatID, fmt.Sprintf("Вы отказались от участия в %d группах", n))
+}
+
+// handleOrgWillParticipateCallback — организатор нажал \"Буду участвовать\"
+func (b *Bot) handleOrgWillParticipateCallback(chatID int64, userID int64, code string) error {
+	// Найти группу и group_id
+	var groupID int64
+	if err := b.db.QueryRow(`SELECT id FROM santa_groups WHERE group_code=$1`, code).Scan(&groupID); err != nil {
+		b.log.Error("handleOrgWillParticipate: select group", zap.Error(err))
+		return b.sendText(chatID, "Группа не найдена")
+	}
+
+	// Убедимся, что участник (организатор) есть в participants — если нет, добавим
+	_, err := b.db.Exec(`INSERT INTO participants (group_id, tg_id, active, desires, leader) VALUES ($1,$2,true,'',true) ON CONFLICT (group_id,tg_id) DO UPDATE SET active=true, leader=TRUE`, groupID, userID)
+	if err != nil {
+		b.log.Error("handleOrgWillParticipate: upsert participant", zap.Error(err))
+		return b.sendText(chatID, "Ошибка при регистрации участия")
+	}
+
+	// Связываем pendingGroup, чтобы следующий ввод пожеланий записался только в эту группу
+	b.pendingGroupMu.Lock()
+	b.pendingGroup[userID] = groupID
+	b.pendingGroupMu.Unlock()
+
+	// Перевести FSM в состояние ввода пожеланий (специальное состояние для организатора)
+	b.fsm.Set(userID, fsm.StateOrgEnterDes)
+
+	return b.sendText(chatID, "Отлично — пришлите одним сообщением ваши пожелания для подарка (они будут привязаны к этой группе).")
+}
+
+// handleOrgSendDesiresCallback — организатор нажал кнопку \"Отправить пожелания\" для конкретной группы
+func (b *Bot) handleOrgSendDesiresCallback(chatID int64, userID int64, code string) error {
+	var groupID int64
+	if err := b.db.QueryRow(`SELECT id FROM santa_groups WHERE group_code=$1`, code).Scan(&groupID); err != nil {
+		b.log.Error("handleOrgSendDesiresCallback: select group", zap.Error(err))
+		return b.sendText(chatID, "Группа не найдена")
+	}
+	// проверка права — пользователь должен быть в участниках или лидер
+	var exists bool
+	if err := b.db.QueryRow(`SELECT true FROM participants WHERE group_id=$1 AND tg_id=$2`, groupID, userID).Scan(&exists); err != nil {
+		// если нет — добавим как обычного участника (но не делаем лидером)
+		_, err2 := b.db.Exec(`INSERT INTO participants (group_id, tg_id, active, desires, leader) VALUES ($1,$2,true,'',false) ON CONFLICT DO NOTHING`, groupID, userID)
+		if err2 != nil {
+			b.log.Error("handleOrgSendDesiresCallback: insert participant", zap.Error(err2))
+			return b.sendText(chatID, "Ошибка при регистрации в группе")
+		}
+	}
+
+	b.pendingGroupMu.Lock()
+	b.pendingGroup[userID] = groupID
+	b.pendingGroupMu.Unlock()
+	b.fsm.Set(userID, fsm.StateOrgEnterDes)
+	return b.sendText(chatID, "Отправьте ваши пожелания для этой группы одним сообщением.")
+}
+
+func (b *Bot) handleShowParticipantsForGroup(chatID int64, userID int64, code string) error {
+	var groupID int64
+	var leaderID int64
+	if err := b.db.QueryRow(`SELECT id, leader_tg_id FROM santa_groups WHERE group_code=$1`, code).Scan(&groupID, &leaderID); err != nil {
+		b.log.Error("handleShowParticipantsForGroup: select group", zap.Error(err))
+		return b.sendText(chatID, "Группа не найдена")
+	}
+	if leaderID != userID {
+		return b.sendText(chatID, "Вы не являетесь организатором этой группы")
+	}
+
+	rows, err := b.db.Query(`SELECT tg_id, desires, active FROM participants WHERE group_id=$1 ORDER BY id`, groupID)
+	if err != nil {
+		b.log.Error("handleShowParticipantsForGroup: query", zap.Error(err))
+		return b.sendText(chatID, "Ошибка при получении участников")
+	}
+	defer rows.Close()
+
+	var sb strings.Builder
+	var any bool
+	for rows.Next() {
+		any = true
+		var tg int64
+		var desires sql.NullString
+		var active bool
+		if err := rows.Scan(&tg, &desires, &active); err != nil {
+			continue
+		}
+		status := "❌"
+		if active {
+			status = "✅"
+		}
+		d := desires.String
+		if d == "" {
+			d = "(пожеланий нет)"
+		}
+		sb.WriteString(fmt.Sprintf("@%d — %s — %s\n", tg, status, d))
+	}
+	if !any {
+		return b.sendText(chatID, "В группе нет участников.")
+	}
+	return b.sendText(chatID, sb.String())
+}
+
+func (b *Bot) handleDeclineForGroup(chatID int64, userID int64, code string) error {
+	// это действие подписано на callback у организатора: он может отключить чьё-то участие?
+	// Но по ТЗ: участник должен иметь кнопку отказаться сам. Здесь мы реализуем отказ текущего пользователя в указанной группе.
+	var groupID int64
+	if err := b.db.QueryRow(`SELECT id FROM santa_groups WHERE group_code=$1`, code).Scan(&groupID); err != nil {
+		b.log.Error("handleDeclineForGroup: select group", zap.Error(err))
+		return b.sendText(chatID, "Группа не найдена")
+	}
+	// Отключаем текущего пользователя в этой группе
+	if _, err := b.db.Exec(`UPDATE participants SET active=false WHERE group_id=$1 AND tg_id=$2`, groupID, userID); err != nil {
+		b.log.Error("handleDeclineForGroup: update", zap.Error(err))
+		return b.sendText(chatID, "Ошибка при отказе от участия")
+	}
+	return b.sendText(chatID, "Вы отказались от участия в этой группе")
 }
 
 // initiateStartSanta — инициирует процесс распределения (лидер вводит код группы в диалоге)
@@ -639,7 +845,7 @@ func (b *Bot) sendStartMessageTo(chatID int64) error {
 // -------------------- SQL миграции подсказка --------------------
 
 /*
-Требуемые таблицы (если ещё не созданы):
+Требуемые таблицы:
 
 CREATE TABLE IF NOT EXISTS santa_groups (
     id SERIAL PRIMARY KEY,
