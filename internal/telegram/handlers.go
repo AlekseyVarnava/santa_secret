@@ -432,7 +432,7 @@ func (b *Bot) handleReceiveDesires(chatID int64, userID int64, text string) erro
 
 	// Возвращаем пользователя в главное меню/ролевое состояние
 	b.fsm.Set(userID, fsm.StateAskRole)
-	return b.sendText(chatID, fmt.Sprintf("Пожелания сохранены"))
+	return b.sendText(chatID, fmt.Sprintf("🎅 Пожелания получены! Спасибо, что поделились!\n\n🎄 Сейчас произойдет магическое распределение. Ожидайте информацию о вашем тайном подопечном!\n"))
 }
 
 // handleShowParticipants — показываем список участников для группы, где текущий пользователь лидер
