@@ -7,7 +7,7 @@ import (
 func MainButtons() tg.ReplyKeyboardMarkup {
 	return tg.NewReplyKeyboard(
 		tg.NewKeyboardButtonRow(
-			tg.NewKeyboardButton("Главное меню"),
+			tg.NewKeyboardButton("🏠 Главное меню"),
 		),
 	)
 }
@@ -15,8 +15,8 @@ func MainButtons() tg.ReplyKeyboardMarkup {
 func StartButtons() tg.ReplyKeyboardMarkup {
 	return tg.NewReplyKeyboard(
 		tg.NewKeyboardButtonRow(
-			tg.NewKeyboardButton("Я организатор"),
-			tg.NewKeyboardButton("Я участник"),
+			tg.NewKeyboardButton("👨‍💼 Я организатор"),
+			tg.NewKeyboardButton("👥 Я участник"),
 		),
 	)
 }
@@ -24,13 +24,13 @@ func StartButtons() tg.ReplyKeyboardMarkup {
 func OrganizerMenu() tg.ReplyKeyboardMarkup {
 	return tg.NewReplyKeyboard(
 		tg.NewKeyboardButtonRow(
-			tg.NewKeyboardButton("Новый Тайный Санта"),
+			tg.NewKeyboardButton("🆕 Новый Тайный Санта"),
 		),
 		tg.NewKeyboardButtonRow(
-			tg.NewKeyboardButton("Я уже Тайный Санта"),
+			tg.NewKeyboardButton("🔄 Я уже Тайный Санта"),
 		),
 		tg.NewKeyboardButtonRow(
-			tg.NewKeyboardButton("Главное меню"),
+			tg.NewKeyboardButton("🏠 Главное меню"),
 		),
 	)
 }

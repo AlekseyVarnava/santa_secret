@@ -7,7 +7,6 @@ import (
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"math/rand"
-	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -44,16 +43,16 @@ func NewBot(db *sql.DB, token string, logger *zap.Logger) (*Bot, error) {
 		return nil, errors.New("bot token empty")
 	}
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	//client := &http.Client{
+	//	Timeout: 30 * time.Second,
+	//}
 
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, err
 	}
 
-	api.Client = client
+	//api.Client = client
 
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -75,7 +74,7 @@ func NewBot(db *sql.DB, token string, logger *zap.Logger) (*Bot, error) {
 func (b *Bot) Run() {
 	b.log.Info("bot run: starting updates listener")
 	u := tgbotapi.NewUpdate(0)
-	u.Timeout = 60
+	u.Timeout = 90
 	updates := b.api.GetUpdatesChan(u)
 
 	for {
@@ -153,17 +152,17 @@ func (b *Bot) handleMessage(msg *tgbotapi.Message) error {
 
 	// Если простое меню
 	switch text {
-	case "Главное меню":
+	case "🏠 Главное меню":
 		return b.sendStartMenu(chatID)
-	case "Я организатор":
+	case "👨‍💼 Я организатор":
 		b.fsm.Set(userID, fsm.StateOrgMenu)
 		return b.showOrganizerMenu(chatID)
-	case "Я участник":
+	case "👥 Я участник":
 		b.fsm.Set(userID, fsm.StateEnterGroupID)
 		return b.sendText(chatID, "Введите код группы, который вам дал организатор:")
-	case "Новый Тайный Санта":
+	case "🆕 Новый Тайный Санта":
 		return b.createGroupFlow(chatID, userID)
-	case "Я уже Тайный Санта":
+	case "🔄 Я уже Тайный Санта":
 		b.fsm.Set(userID, fsm.StateOrgGroupID)
 		return b.sendText(chatID, "Введите код группы:")
 	case "Показать участников":
@@ -241,7 +240,7 @@ func (b *Bot) handleCallback(q *tgbotapi.CallbackQuery) error {
 
 func (b *Bot) cmdStart(chatID int64, userID int64) error {
 	b.fsm.Set(userID, fsm.StateAskRole)
-	msg := "Привет! Тут нужно тебе придумать новогоднее обращение интересное, и нужно спросить, человек организатор тайного санты или участник"
+	msg := "🎄 Привет! Это бот Тайного Санты!\nПодскажи, ты организатор или участник?"
 	m := tgbotapi.NewMessage(chatID, msg)
 	m.ReplyMarkup = StartButtons()
 	_, err := b.api.Send(m)
@@ -249,7 +248,7 @@ func (b *Bot) cmdStart(chatID int64, userID int64) error {
 }
 
 func (b *Bot) sendStartMenu(chatID int64) error {
-	m := tgbotapi.NewMessage(chatID, "Главное меню")
+	m := tgbotapi.NewMessage(chatID, "🏠 Главное меню")
 	m.ReplyMarkup = StartButtons()
 	_, err := b.api.Send(m)
 	return err
@@ -291,8 +290,18 @@ func (b *Bot) createGroupFlow(chatID int64, userID int64) error {
 	}
 
 	// Спросим, будет ли участвовать организатор
-	text := fmt.Sprintf("Создана новая группа Тайного Санты.\nКод группы: %s\nПоделитесь кодом с друзьями.\nВы хотите участвовать?", code)
+	text := fmt.Sprintf(
+		"Создана новая группа Тайного Санты.\n"+
+			"<b>Код группы:</b>\n"+
+			"<pre>%s</pre>\n"+
+			"Поделитесь кодом с друзьями.\n"+
+			"Вы хотите участвовать?",
+		code,
+	)
+
+	//text := fmt.Sprintf("Создана новая группа Тайного Санты.\nКод группы: `%s`\nПоделитесь кодом с друзьями.\nВы хотите участвовать?", code)
 	m := tgbotapi.NewMessage(chatID, text)
+	m.ParseMode = "HTML"
 	m.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Буду участвовать", "ORG_WILL_PARTICIPATE:"+code),
@@ -366,14 +375,14 @@ func (b *Bot) handleOrganizerGroupCode(chatID int64, userID int64, code string) 
 	m.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Показать участников", "SHOW_PARTICIPANTS:"+code),
-			tgbotapi.NewInlineKeyboardButtonData("Отправить пожелания", "ORG_SEND_DESIRES:"+code),
+			tgbotapi.NewInlineKeyboardButtonData("Отправить свои пожелания", "ORG_SEND_DESIRES:"+code),
 		),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("Отказаться от участника (по коду)", "DECLINE_FOR_GROUP:"+code),
 			tgbotapi.NewInlineKeyboardButtonData("Запустить Тайного Санту!", "START_FOR_GROUP:"+code),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Главное меню", "MAIN_MENU"),
+			tgbotapi.NewInlineKeyboardButtonData("🏠 Главное меню", "MAIN_MENU"),
 		),
 	)
 	_, err := b.api.Send(m)
@@ -423,7 +432,7 @@ func (b *Bot) handleReceiveDesires(chatID int64, userID int64, text string) erro
 
 	// Возвращаем пользователя в главное меню/ролевое состояние
 	b.fsm.Set(userID, fsm.StateAskRole)
-	return b.sendText(chatID, fmt.Sprintf("Пожелания сохранены для %d группы(ы)", affected))
+	return b.sendText(chatID, fmt.Sprintf("Пожелания сохранены"))
 }
 
 // handleShowParticipants — показываем список участников для группы, где текущий пользователь лидер
@@ -494,7 +503,7 @@ func (b *Bot) handleOrgWillParticipateCallback(chatID int64, userID int64, code 
 	// Перевести FSM в состояние ввода пожеланий (специальное состояние для организатора)
 	b.fsm.Set(userID, fsm.StateOrgEnterDes)
 
-	return b.sendText(chatID, "Отлично — пришлите одним сообщением ваши пожелания для подарка (они будут привязаны к этой группе).")
+	return b.sendText(chatID, "Отлично — пришлите одним сообщением ваши пожелания для подарка.")
 }
 
 // handleOrgSendDesiresCallback — организатор нажал кнопку \"Отправить пожелания\" для конкретной группы
@@ -519,7 +528,7 @@ func (b *Bot) handleOrgSendDesiresCallback(chatID int64, userID int64, code stri
 	b.pendingGroup[userID] = groupID
 	b.pendingGroupMu.Unlock()
 	b.fsm.Set(userID, fsm.StateOrgEnterDes)
-	return b.sendText(chatID, "Отправьте ваши пожелания для этой группы одним сообщением.")
+	return b.sendText(chatID, "Отправьте ваши пожелания одним сообщением.")
 }
 
 func (b *Bot) handleShowParticipantsForGroup(chatID int64, userID int64, code string) error {
@@ -585,7 +594,7 @@ func (b *Bot) handleDeclineForGroup(chatID int64, userID int64, code string) err
 // initiateStartSanta — инициирует процесс распределения (лидер вводит код группы в диалоге)
 func (b *Bot) initiateStartSanta(chatID int64, userID int64) error {
 	b.fsm.Set(userID, fsm.StateOrgStartSanta)
-	return b.sendText(chatID, "Введите код группы, для которой хотите запустить Тайного Санту (или используйте /run_group <CODE>):")
+	return b.sendText(chatID, "Введите код группы, для которой хотите запустить Тайного Санту:")
 }
 
 type p struct {
@@ -778,32 +787,82 @@ func (b *Bot) sendAssignmentsToParticipants(code string) error {
 	}
 
 	// Параллельная отправка с семафором
+	type UserInfo struct {
+		UserName  string
+		FirstName string
+		LastName  string
+	}
+
+	// кэш информации о пользователях
+	cache := make(map[int64]UserInfo)
+	for _, p := range pairs {
+		if _, ok := cache[p.r]; ok {
+			continue
+		}
+		chat, err := b.api.GetChat(tgbotapi.ChatInfoConfig{ChatConfig: tgbotapi.ChatConfig{ChatID: p.r}})
+		if err != nil {
+			cache[p.r] = UserInfo{}
+			b.log.Warn("GetChat failed", zap.Int64("user", p.r), zap.Error(err))
+			continue
+		}
+		cache[p.r] = UserInfo{
+			UserName:  chat.UserName,
+			FirstName: chat.FirstName,
+			LastName:  chat.LastName,
+		}
+	}
+
 	sem := make(chan struct{}, 8)
 	var wg sync.WaitGroup
 	var firstErr error
 	var mu sync.Mutex
-	for _, p := range pairs {
+
+	for _, pair := range pairs {
 		wg.Add(1)
 		sem <- struct{}{}
-		go func(pair pr) {
+
+		go func(p pr) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			text := fmt.Sprintf("Вам нужно подарить: @%d\nПожелания: %s", pair.r, desires[pair.r])
-			msg := tgbotapi.NewMessage(pair.g, text)
+
+			info := cache[p.r]
+
+			fullName := strings.TrimSpace(info.FirstName + " " + info.LastName)
+			if fullName == "" {
+				fullName = "Этот участник"
+			}
+
+			var mention string
+			if info.UserName != "" {
+				mention = "@" + info.UserName
+			} else {
+				mention = fmt.Sprintf("tg://user?id=%d", p.r)
+			}
+
+			text := fmt.Sprintf(
+				"🎁 %s уже ждёт подарок от вас\n%s\n\nПожелания для подарка:\n%s",
+				fullName,
+				mention,
+				desires[p.r],
+			)
+
+			msg := tgbotapi.NewMessage(p.g, text)
 			if _, err := b.api.Send(msg); err != nil {
 				mu.Lock()
 				if firstErr == nil {
 					firstErr = err
 				}
 				mu.Unlock()
-				b.log.Warn("failed to send message to participant", zap.Int64("to", pair.g), zap.Error(err))
+				b.log.Warn("failed to send gift assignment", zap.Int64("to", p.g), zap.Error(err))
 			}
-		}(p)
+		}(pair)
 	}
+
 	wg.Wait()
 	if firstErr != nil {
 		return firstErr
 	}
+
 	// уведомим лидера, что рассылка завершена
 	return b.sendTextToLeaderOfCode(code, "Уведомления отправлены всем участникам")
 }
